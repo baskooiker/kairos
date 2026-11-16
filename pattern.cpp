@@ -23,13 +23,17 @@ static const float RANK_SHUFFLE_JITTER = 12.0f;
 // channel continuously.
 static const float DENSITY_HYSTERESIS = 0.2f;
 
+// Gate shape odds per step: the rest is a regular half step gate. A tie only
+// sounds as one when empty steps follow the hit, so it shows up more at lower
+// densities and never at full density.
+static const float SHORT_GATE_CHANCE = 0.2f;
+static const float TIE_GATE_CHANCE   = 0.3f;
+
+// Gate shapes re-rolled per pattern cycle, part of the slow evolution
+static const int SHAPE_ROLLS_PER_CYCLE = 1;
+
 // The three loop lengths a Turing machine can settle on
 static const uint8_t TURING_LENGTHS[3] = {8, 16, 32};
-
-// How eagerly each machine follows the CTRL4 gesture. Machine 2 is a little
-// less sensitive, so the same gesture rewrites it less and the pair stays
-// distinct.
-static const float TURING_SCALE[NUM_TURING_MACHINES] = {1.0f, 0.75f};
 
 // Chance per step that a step is rewritten, at full gesture activity. Only one
 // step is offered per clock step, so this has to be high for a knob move to
@@ -106,20 +110,11 @@ void KompassChannel::Init(KompassCharacter character)
                 else
                     w = (float)(metric * 6);
                 break;
-
-            case KOMPASS_OFFBEAT:
-                // 8th offbeats first, then 8ths, then the 16th subdivisions
-                if(s % 4 == 2)
-                    w = 50.0f;
-                else if(s % 4 == 0)
-                    w = 30.0f;
-                else
-                    w = 12.0f + (float)metric;
-                break;
         }
 
         baseWeight[s] = w;
         shuffle[s]    = 0.0f;
+        RollShape(s);
 
         // Start the drift somewhere random so no two boots play the same thing
         drift[s] = RandomBipolar(DRIFT_RANGE * 0.5f);
@@ -203,8 +198,58 @@ void KompassChannel::Morph()
             drift[step] = DRIFT_RANGE;
     }
 
+    for(int i = 0; i < SHAPE_ROLLS_PER_CYCLE; i++)
+        RollShape(rand() % PATTERN_STEPS);
+
     ApplyDrift();
     ComputeRanks();
+}
+
+/** Give a step a new gate shape, and a tie length in case it is a tie */
+void KompassChannel::RollShape(int s)
+{
+    float roll = RandomFloat();
+
+    if(roll < SHORT_GATE_CHANCE)
+        shape[s] = GATE_SHAPE_SHORT;
+    else if(roll < SHORT_GATE_CHANCE + TIE_GATE_CHANCE)
+        shape[s] = GATE_SHAPE_TIE;
+    else
+        shape[s] = GATE_SHAPE_REGULAR;
+
+    tieSteps[s] = (uint8_t)(1 + rand() % MAX_TIE_STEPS);
+}
+
+/**
+ * @brief Empty steps the hit at `step` holds its gate through
+ *
+ * Zero unless the hit is a tie. A tie stops at the next hit, so it can only
+ * ever fill a gap and never swallow one; with every step firing there is no
+ * gap to fill.
+ */
+int KompassChannel::TiedSteps(int step) const
+{
+    int s = Unrotate(step);
+    if(shape[s] != GATE_SHAPE_TIE)
+        return 0;
+
+    int tied = 0;
+    while(tied < tieSteps[s]
+          && !StepActive((step + tied + 1) % PATTERN_STEPS))
+        tied++;
+
+    return tied;
+}
+
+/** Gate length of the hit at `step`, in clock pulses */
+int KompassChannel::GatePulses(int step) const
+{
+    if(shape[Unrotate(step)] == GATE_SHAPE_SHORT)
+        return SHORT_GATE_PULSES;
+
+    // A tie ends halfway through its last step, like a regular gate would, so
+    // the next hit always finds the gate low
+    return TiedSteps(step) * PULSES_PER_STEP + REGULAR_GATE_PULSES;
 }
 
 /**
@@ -232,9 +277,15 @@ void KompassChannel::Shift(int by)
  */
 void KompassChannel::Reshuffle(int keep)
 {
+    // The gate shapes of the steps not playing are re-rolled along with them
     for(int s = 0; s < PATTERN_STEPS; s++)
+    {
         if(rank[s] >= keep)
+        {
             shuffle[s] = RandomBipolar(RANK_SHUFFLE_JITTER);
+            RollShape(s);
+        }
+    }
 
     ApplyDrift();
     ComputeRanks(keep);
@@ -298,7 +349,7 @@ void TuringMachine::ReplicateClass(int step, int len)
         value[q] = value[step];
 }
 
-void TuringMachine::Init(uint32_t seed, float scale)
+void TuringMachine::Init(uint32_t seed)
 {
     srand(seed);
 
@@ -306,9 +357,9 @@ void TuringMachine::Init(uint32_t seed, float scale)
         value[s] = (uint8_t)(rand() & 0xFF);
 
     length         = TURING_LENGTHS[rand() % 3];
-    pendingLength  = 0;
-    injectionScale = scale;
-    target         = 0.0f;
+    pendingLength = 0;
+    activity      = 0.0f;
+    target        = 0.0f;
 
     // Make the frame periodic with the starting length
     for(int s = 0; s < length; s++)
@@ -319,7 +370,7 @@ void TuringMachine::Init(uint32_t seed, float scale)
  * @brief Commit a finished length morph, or roll for a new one
  *
  * Called at step 0 so a length morph always spans exactly one frame. Like the
- * step values, the length only ever changes while CTRL4 is being moved.
+ * step values, the length only ever changes while the machine's knob is moved.
  */
 void TuringMachine::BeginFrame()
 {
@@ -330,7 +381,7 @@ void TuringMachine::BeginFrame()
         return;
     }
 
-    float chance = knobActivity * injectionScale * MAX_LENGTH_CHANCE;
+    float chance = activity * MAX_LENGTH_CHANCE;
 
     if(RandomFloat() >= chance)
         return;
@@ -344,10 +395,10 @@ float TuringMachine::Step(int step)
 {
     int activeLength = pendingLength ? pendingLength : length;
 
-    // Write a new value into this step if the CTRL4 gesture calls for it. The
+    // Write a new value into this step if the knob gesture calls for it. The
     // whole loop position is rewritten, so every repetition of it in the frame
     // follows along.
-    float chance = knobActivity * injectionScale * MAX_INJECTION;
+    float chance = activity * MAX_INJECTION;
 
     if(RandomFloat() < chance)
     {
@@ -383,10 +434,9 @@ void InitPatterns()
 
     kompass[0].Init(KOMPASS_DOWNBEAT);
     kompass[1].Init(KOMPASS_BACKBEAT);
-    kompass[2].Init(KOMPASS_OFFBEAT);
 
     for(int t = 0; t < NUM_TURING_MACHINES; t++)
-        turing[t].Init(seed + 15485863u * (uint32_t)(t + 1), TURING_SCALE[t]);
+        turing[t].Init(seed + 15485863u * (uint32_t)(t + 1));
 
     srand(seed);
 }
@@ -406,6 +456,41 @@ void FireReset()
     dsy_gpio_write(&hw.gate_output, 1);
 }
 
+/**
+ * @brief Raise a gate for `pulses` clock pulses
+ *
+ * The audio callback holds the rising edge back by the gate delay. A gate that
+ * is still high, which only happens when a gate clock speeds up, therefore
+ * drops for that long and is raised again rather than merging into this one.
+ */
+static void StartGate(int out, int pulses)
+{
+    gatePulsesLeft[out]   = pulses;
+    gateDelayCounter[out] = GATE_DELAY_SAMPLES;
+    gateOut[out]          = true;
+}
+
+void TickGates()
+{
+    for(int g = 0; g < NUM_GATE_OUTS; g++)
+    {
+        if(gatePulsesLeft[g] <= 0)
+            continue;
+
+        if(--gatePulsesLeft[g] == 0)
+            gateOut[g] = false;
+    }
+}
+
+void ClearGates()
+{
+    for(int g = 0; g < NUM_GATE_OUTS; g++)
+    {
+        gatePulsesLeft[g] = 0;
+        gateOut[g]        = false;
+    }
+}
+
 void ProcessStep(int step)
 {
     // OUT4: 16th note clock, fires on every step
@@ -422,18 +507,24 @@ void ProcessStep(int step)
             turing[t].BeginFrame();
     }
 
-    // OUT1-3: Kompass density channels
+    // OUT1 and OUT3: channel A and B gates, OUT2: channel A accents
+    static const int GATE_OF_CHANNEL[NUM_KOMPASS_CHANNELS] = {GATE_A, GATE_B};
+
     bool triggered[NUM_KOMPASS_CHANNELS];
 
     for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
     {
         triggered[c] = kompass[c].StepActive(step);
 
-        if(triggered[c])
-        {
-            triggerOut[c]     = true;
-            triggerCounter[c] = 0;
-        }
+        if(!triggered[c])
+            continue;
+
+        int pulses = kompass[c].GatePulses(step);
+        StartGate(GATE_OF_CHANNEL[c], pulses);
+
+        // The accent lasts as long as the note it accents
+        if(c == 0 && kompass[c].StepAccented(step))
+            StartGate(GATE_A_ACCENT, pulses);
     }
 
     // CV1-2: the Turing machines always advance so they stay locked to the

@@ -55,8 +55,7 @@ void StopClock()
     resyncArmed = false;
 
     // Leave the pulse phase alone so Continue can pick up where we stopped
-    for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
-        triggerOut[c] = false;
+    ClearGates();
     clockOut = false;
 }
 
@@ -103,6 +102,10 @@ void OnClockPulse(bool forwardToMidiOut)
 
     if(!isRunning)
         return;
+
+    // Gate lengths count clock pulses; the tick comes first so a gate ending on
+    // a step boundary is down before the step raises the next one
+    TickGates();
 
     if(pulseInStep == 0)
         ProcessStep(currentStep);
@@ -210,6 +213,7 @@ void OnGateClockEdge()
     SendMidiRealtime(MIDI_CLOCK);
     pulsesSinceGateEdge = 1;
 
+    TickGates();
     ProcessStep(currentStep);
 }
 
@@ -246,6 +250,7 @@ void FillGateClockPulse()
 
     pulsesSinceGateEdge++;
     SendMidiRealtime(MIDI_CLOCK);
+    TickGates();
 }
 
 /** @brief Fall back to the internal clock when the patched clock goes away */
@@ -293,8 +298,8 @@ void ProcessGateInputs()
 // CONTROLS
 // ============================================================================
 
-// The CTRL4 gesture is measured over a window instead of per control tick: at
-// the 1kHz control rate a deliberate sweep moves the knob by less than the ADC
+// The write gestures on CTRL2 and CTRL4 are measured over a window instead of
+// per control tick: at the 1kHz control rate a deliberate sweep moves the knob by less than the ADC
 // noise floor within a single tick, so a per-tick deadband only ever let a
 // flick of the wrist through and the write probability stayed near zero.
 static const uint32_t KNOB_WINDOW_TICKS = 20; // 20ms measurement window
@@ -449,64 +454,69 @@ void ProcessControls()
 
     ProcessMenu();
 
-    // CTRL1-3: Kompass channel densities. Moving one re-rolls the steps that
-    // channel is not playing, so the hits it gains are new ones.
-    for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
-        kompass[c].SetDensity(hw.GetKnobValue((DaisyPatch::Ctrl)c));
+    // CTRL1 and CTRL3: channel A and B densities. Moving one re-rolls the steps
+    // that channel is not playing, so the hits it gains are new ones.
+    kompass[0].SetDensity(hw.GetKnobValue(DaisyPatch::CTRL_1));
+    kompass[1].SetDensity(hw.GetKnobValue(DaisyPatch::CTRL_3));
 
-    // CTRL4: gesture control for the Turing machines. Moving the knob raises
-    // the chance that steps get rewritten; the knob position decides what gets
-    // written. The level fades once the knob stops, which locks the loops.
-    // Movement is measured on the raw travel, so a gesture still registers at
-    // either extreme; the value being painted uses the stretched range, so the
-    // sequences can reach the ends of the CV range on a control that falls
-    // short of its own
-    float knobRaw = hw.GetKnobValue(DaisyPatch::CTRL_4);
-    float knob    = NormalizeKnob(knobRaw);
+    // CTRL2 and CTRL4: write gestures for Turing machine 1 and 2
+    static const DaisyPatch::Ctrl GESTURE_KNOB[NUM_TURING_MACHINES]
+        = {DaisyPatch::CTRL_2, DaisyPatch::CTRL_4};
 
-    static uint32_t knobWindowTicks = 0;
+    static uint32_t knobWindowTicks  = 0;
     static uint32_t knobPrimeWindows = KNOB_PRIME_WINDOWS;
+    static float    lastKnobValue[NUM_TURING_MACHINES] = {0.0f, 0.0f};
 
-    if(++knobWindowTicks >= KNOB_WINDOW_TICKS)
+    bool windowDone = ++knobWindowTicks >= KNOB_WINDOW_TICKS;
+    if(windowDone)
+        knobWindowTicks = 0;
+
+    // The ADC needs a moment to settle after boot; until it has, only the
+    // reference is tracked, so a knob's resting position is not mistaken for a
+    // gesture
+    bool primed = knobPrimeWindows == 0;
+    if(windowDone && !primed)
+        knobPrimeWindows--;
+
+    for(int t = 0; t < NUM_TURING_MACHINES; t++)
     {
-        // The ADC needs a moment to settle after boot; until it has, only the
-        // reference is tracked, so the knob's resting position is not mistaken
-        // for a gesture
-        if(knobPrimeWindows)
+        // Moving the knob raises the chance that steps get rewritten; the knob
+        // position decides what gets written. The level fades once the knob
+        // stops, which locks the loop. Movement is measured on the raw travel,
+        // so a gesture still registers at either extreme; the value being
+        // painted uses the stretched range, so the sequence can reach the ends
+        // of the CV range on a control that falls short of its own.
+        float knobRaw = hw.GetKnobValue(GESTURE_KNOB[t]);
+
+        if(windowDone)
         {
-            knobPrimeWindows--;
-        }
-        else
-        {
-            float delta = knobRaw - lastKnobValue;
+            float delta = knobRaw - lastKnobValue[t];
             if(delta < 0.0f)
                 delta = -delta;
 
-            if(delta > KNOB_DEADBAND)
+            if(primed && delta > KNOB_DEADBAND)
             {
-                knobActivity += delta * KNOB_ACTIVITY_GAIN;
+                turing[t].activity += delta * KNOB_ACTIVITY_GAIN;
 
                 // Any deliberate movement is worth a usable write chance
                 // straight away rather than having to be built up first
-                if(knobActivity < KNOB_ACTIVITY_FLOOR)
-                    knobActivity = KNOB_ACTIVITY_FLOOR;
-                if(knobActivity > 1.0f)
-                    knobActivity = 1.0f;
+                if(turing[t].activity < KNOB_ACTIVITY_FLOOR)
+                    turing[t].activity = KNOB_ACTIVITY_FLOOR;
+                if(turing[t].activity > 1.0f)
+                    turing[t].activity = 1.0f;
             }
+
+            lastKnobValue[t] = knobRaw;
         }
 
-        lastKnobValue   = knobRaw;
-        knobWindowTicks = 0;
+        turing[t].activity *= KNOB_ACTIVITY_DECAY;
+        if(turing[t].activity < 0.0001f)
+            turing[t].activity = 0.0f;
+
+        // The knob position is the value being painted, whether or not the
+        // gesture is currently active
+        turing[t].target = NormalizeKnob(knobRaw);
     }
-
-    knobActivity *= KNOB_ACTIVITY_DECAY;
-    if(knobActivity < 0.0001f)
-        knobActivity = 0.0f;
-
-    // The knob position is the value being painted, whether or not the gesture
-    // is currently active
-    for(int t = 0; t < NUM_TURING_MACHINES; t++)
-        turing[t].target = knob;
 }
 
 // ============================================================================

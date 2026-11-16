@@ -1,33 +1,37 @@
 # Kairos
 
-MIDI clock master/slave and generative trigger source for the **Daisy Patch**.
+MIDI clock master/slave and generative gate source for the **Daisy Patch**.
 
 ## I/O
 
 | Jack | Function |
 |------|----------|
-| OUT1 | Kompass channel 1 trigger (downbeat character) |
-| OUT2 | Kompass channel 2 trigger (backbeat character) |
-| OUT3 | Kompass channel 3 trigger (offbeat/16th character) |
+| OUT1 | Channel A gate (downbeat character) |
+| OUT2 | Channel A accent |
+| OUT3 | Channel B gate (backbeat character) |
 | OUT4 | 16th note clock |
 | GATE OUT | Reset pulse, fired just before the transport starts or on a resync |
-| CV1 | Turing machine sequence 1, sampled on OUT1 triggers (0-5V) |
-| CV2 | Turing machine sequence 2, sampled on OUT2 triggers (0-5V) |
+| CV1 | Turing machine 1, sampled on channel A hits (0-5V) |
+| CV2 | Turing machine 2, sampled on channel B hits (0-5V) |
 | GATE IN1 | Analog clock in, one pulse per step (16th note) |
 | GATE IN2 | Reset in |
-| CTRL1-3 | Density of Kompass channels 1-3 (re-rolls the steps not playing) |
-| CTRL4 | Turing machine write gesture (see below) |
+| CTRL1 | Density of channel A (re-rolls the steps not playing) |
+| CTRL2 | Write gesture for Turing machine 1 (see below) |
+| CTRL3 | Density of channel B (re-rolls the steps not playing) |
+| CTRL4 | Write gesture for Turing machine 2 |
 | Encoder turn | Choose a menu item, or edit the active one |
 | Encoder press | Activate / leave the item, or start/stop on the transport |
 | MIDI IN | Clock, Start, Continue, Stop, Reset, Song Position Pointer |
 | MIDI OUT | Clock and transport, generated or forwarded |
 
-Triggers are 10ms at 5V, the reset pulse is 20ms.
+Gates are 5V and vary in length (see *Gate lengths*). They rise 1ms after their step,
+so the CV has settled and a gate is always seen as a new one. The clock pulse on OUT4 is
+10ms, the reset pulse 20ms.
 
 ## Menu
 
-The encoder is both the menu and the transport. Turning it moves between six items:
-tempo, transport, resync, and the three Kompass patterns. A press activates the item under the
+The encoder is both the menu and the transport. Turning it moves between five items:
+tempo, transport, resync, and the two Kompass patterns. A press activates the item under the
 highlight; turning then edits it. Another press leaves it and the encoder goes back to
 moving between items.
 
@@ -56,7 +60,7 @@ moving between items.
   own position. Like the transport it acts on the press and has no activated state.
   If the sequencer stops while the menu sits on it, the menu falls back to the
   transport.
-- **Pattern 1-3**: rotates that Kompass channel forwards or backwards in time, one step
+- **Pattern A/B**: rotates that Kompass channel forwards or backwards in time, one step
   per detent, wrapping at 32. Only the mapping from time to ranking moves, so a shift
   costs nothing, never changes how many steps fire, and survives both the drift and the
   density control.
@@ -102,10 +106,11 @@ Kairos is always a usable clock master for the rest of the rig.
 
 ## Kompass channels
 
-Each of the three trigger channels ranks all 32 steps by a weight table that reflects
-its rhythmic character. The density control decides how many of those steps may fire,
-lowest rank first, so turning density up adds triggers to the pattern that is already
-playing instead of generating a new one.
+There are two channels: A with a downbeat character, strong metric positions first, and
+B with a backbeat character, beats 2 and 4 first. Each ranks all 32 steps by a weight
+table that reflects its character. The density control decides how many of those steps
+may fire, lowest rank first, so turning density up adds hits to the pattern that is
+already playing instead of generating a new one.
 
 The number to the right of each row on the display is how many of the 32 steps that
 channel is currently firing, so a density can be dialled to an exact step count rather
@@ -132,24 +137,50 @@ channel to zero and bringing it back is the quick way to ask for a new pattern.
 The re-roll range is smaller than the gap between a channel's leading step and its
 weakest one, so a channel always keeps its strongest step however often the density is
 swept, while steps in neighbouring tiers trade places freely. A channel whose active
-hits are all one tier, such as the offbeat channel at exactly 8 steps, therefore changes
-less than one sitting on a tier boundary.
+hits are all one tier therefore changes less than one sitting on a tier boundary.
 
 The step count uses a small hysteresis, so control noise sitting on a boundary cannot
 reshuffle a channel. The step count also uses the shared control margin described under
 *Controls*, so an empty and a completely full pattern are reachable on every channel.
 
+**Accents.** OUT2 accents channel A on its strongest hits, the top quarter of its ranking,
+rounded up, so a single hit is always accented. An accent gate lasts as long as the
+note it accents. The accents follow the ranking, so they move with the drift and the
+density control like the hits do.
+
+## Gate lengths
+
+Every step carries a gate shape as part of the pattern, so a hit plays the same length
+every cycle:
+
+- **Short**, about a fifth of the steps: a third of a step.
+- **Tie**, about a third: the gate holds through up to 1 to 3 following empty steps and
+  drops halfway through the last one, so the next hit always starts from a low gate. A
+  tie stops at the next hit, so it only ever fills a gap. With no empty step after it, it
+  plays as a regular gate. Ties therefore appear as the density goes down, and a full
+  pattern is plain 16ths.
+- **Regular**, the rest: half a step.
+
+Lengths are counted in clock pulses, 6 to a step, so they follow the tempo under every
+clock source. The drift re-rolls one step's shape per pattern cycle, and moving the
+density re-rolls the shapes of the steps not playing, so the shapes evolve along with
+the hits.
+
+The display draws a hit one pixel wide for a short gate and two for a regular one; a tie
+adds a low bar through the steps it holds, and an accent puts a line above the hit.
+
 ## Turing machines
 
-Two independent sequences living in the same 32 step frame as the triggers, one 8-bit
+Two independent sequences living in the same 32 step frame as the gates, one 8-bit
 value per step. The loop length is 8, 16 or 32 steps; at length 8 the frame holds four
 repetitions of the same 8 steps.
 
-The loops never change on their own. Everything is driven by the CTRL4 gesture:
+The loops never change on their own. Each is driven by a gesture on its own knob, CTRL2
+for machine 1 and CTRL4 for machine 2:
 
 - **Moving** the knob raises the chance that a step gets rewritten. Any deliberate
   movement immediately buys a usable write chance instead of having to build one up.
-  Stop moving and that chance fades out over about a second, which locks the loops
+  Stop moving and that chance fades out over about a second, which locks the loop
   again. Parking the knob anywhere, at any value, changes nothing.
   Movement is measured over a 20ms window rather than per control tick: at the 1kHz
   control rate a normal sweep moves the knob by less than the ADC noise floor within a
@@ -168,13 +199,14 @@ The loops never change on their own. Everything is driven by the CTRL4 gesture:
 A length change is applied one step at a time as the playhead sweeps one frame, so
 shrinking pulls the later repetitions onto the earlier ones step by step, and growing
 lets the repetitions drift apart from that point on. The display shows the current
-length, `8>16` while a morph is in flight, and the gesture level on the `W` bar. The
+length, `8>16` while a morph is in flight, and the gesture level as a bar under the
+machine's CV bar. The
 clock source is shown in the header as `GTE`, `EXT` or `INT`.
 
-The voltages are not sent on every step. Machine 1 is sampled and held on Kompass
-channel 1 triggers and machine 2 on channel 2 triggers, so each CV only moves when its
-paired trigger fires. The machines still advance every step, which keeps them locked to
-the 32 step frame and to the trigger pattern.
+The voltages are not sent on every step. Machine 1 is sampled and held on channel A hits
+and machine 2 on channel B hits, so each CV only moves when its paired channel fires. The
+machines still advance every step, which keeps them locked to the 32 step frame and to
+the gate pattern.
 
 ## Controls
 
@@ -191,4 +223,4 @@ make clean && make
 make program-dfu
 ```
 
-Flash usage: 80.7% of 128KB.
+Flash usage: 81.1% of 128KB.

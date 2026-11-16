@@ -9,7 +9,7 @@
 // The grid is narrowed to 3px per step to free the right hand edge for the
 // per channel step counts
 static const int GRID_CELL_WIDTH = 3;
-static const int GRID_ROW_HEIGHT = 8;
+static const int GRID_ROW_HEIGHT = 9;
 static const int GRID_TOP        = 12;
 static const int GRID_COUNT_X    = 104;
 
@@ -17,6 +17,12 @@ static const int GRID_COUNT_X    = 104;
 // encoder is pointing at the item, filled means turning it edits the item.
 static const int MARKER_LEFT  = 97;
 static const int MARKER_RIGHT = 101;
+
+// Turing machine blocks below the grid: label, CV bar and gesture bar
+static const int TURING_TOP    = 34;
+static const int TURING_HEIGHT = 15;
+static const int BAR_LEFT      = 44;
+static const int BAR_RIGHT     = 127;
 
 static void RenderHeader()
 {
@@ -70,64 +76,79 @@ static void RenderHeader()
     hw.display.WriteString(buffer, Font_6x8, true);
 }
 
+/**
+ * Each channel is a row of 32 cells. A hit is a block whose width shows its
+ * gate: one pixel for a short gate, two for a regular one, and a tie carries a
+ * low bar through the empty steps it holds. Channel A marks its accents with a
+ * line above the hit.
+ */
 static void RenderKompassGrid()
 {
     char buffer[8];
 
     for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
     {
+        const KompassChannel& channel = kompass[c];
+
         int y = GRID_TOP + c * GRID_ROW_HEIGHT;
 
         for(int s = 0; s < PATTERN_STEPS; s++)
         {
-            int  x      = s * GRID_CELL_WIDTH;
-            bool active = kompass[c].StepActive(s);
+            int x = s * GRID_CELL_WIDTH;
 
-            if(active)
-                hw.display.DrawRect(x, y, x + 1, y + 5, true, true);
-            else
-                hw.display.DrawPixel(x, y + 5, true);
+            if(!channel.StepActive(s))
+            {
+                hw.display.DrawPixel(x, y + 7, true);
+                continue;
+            }
+
+            bool short_gate
+                = channel.shape[channel.Unrotate(s)] == GATE_SHAPE_SHORT;
+            hw.display.DrawRect(
+                x, y + 2, short_gate ? x : x + 1, y + 7, true, true);
+
+            int tied = channel.TiedSteps(s);
+            if(tied > 0)
+            {
+                // A tie may wrap past the end of the frame; draw what fits
+                int end = x + tied * GRID_CELL_WIDTH + 1;
+                int last = PATTERN_STEPS * GRID_CELL_WIDTH - 1;
+                hw.display.DrawRect(
+                    x + 2, y + 6, end < last ? end : last, y + 7, true, true);
+            }
+
+            if(c == 0 && channel.StepAccented(s))
+                hw.display.DrawLine(x, y, x + 1, y, true);
         }
 
         if(menuItem == MENU_PATTERN_1 + c)
-            hw.display.DrawRect(MARKER_LEFT, y + 1, MARKER_RIGHT, y + 5, true,
+            hw.display.DrawRect(MARKER_LEFT, y + 2, MARKER_RIGHT, y + 6, true,
                                 menuActive);
 
         // How many of the 32 steps this channel is firing, so a density can be
         // dialled to an exact step count instead of by eye
-        snprintf(buffer, sizeof(buffer), "%2d", kompass[c].ActiveSteps());
-        hw.display.SetCursor(GRID_COUNT_X, y);
+        snprintf(buffer, sizeof(buffer), "%2d", channel.ActiveSteps());
+        hw.display.SetCursor(GRID_COUNT_X, y + 1);
         hw.display.WriteString(buffer, Font_6x8, true);
     }
 
     // Playhead under the grid
     int px = currentStep * GRID_CELL_WIDTH;
-    hw.display.DrawRect(px, GRID_TOP + NUM_KOMPASS_CHANNELS * GRID_ROW_HEIGHT,
-                        px + 1,
-                        GRID_TOP + NUM_KOMPASS_CHANNELS * GRID_ROW_HEIGHT + 1,
-                        true, true);
+    int py = GRID_TOP + NUM_KOMPASS_CHANNELS * GRID_ROW_HEIGHT;
+    hw.display.DrawRect(px, py, px + 1, py + 1, true, true);
 }
 
-/** CTRL4 gesture level: how strongly the Turing machines are being rewritten */
-static void RenderActivity()
-{
-    hw.display.SetCursor(0, 38);
-    hw.display.WriteString("W", Font_6x8, true);
-
-    int width = (int)(knobActivity * 110.0f);
-    if(width > 0)
-        hw.display.DrawRect(10, 40, 10 + width, 43, true, true);
-    else
-        hw.display.DrawLine(10, 43, 120, 43, true);
-}
-
-static void RenderCvBars()
+/**
+ * Per Turing machine: loop length, the held voltage as a bar, and under it the
+ * level of the write gesture on its knob
+ */
+static void RenderTuring()
 {
     char buffer[16];
 
     for(int t = 0; t < NUM_TURING_MACHINES; t++)
     {
-        int y = 46 + t * 9;
+        int y = TURING_TOP + t * TURING_HEIGHT;
 
         // Loop length, showing the target while a length morph is in progress
         if(turing[t].pendingLength)
@@ -140,13 +161,19 @@ static void RenderCvBars()
         hw.display.WriteString(buffer, Font_6x8, true);
 
         // Outline plus fill proportional to the held voltage
-        int left = 44;
-        hw.display.DrawRect(left, y, 127, y + 6, true, false);
+        hw.display.DrawRect(BAR_LEFT, y, BAR_RIGHT, y + 6, true, false);
 
-        int width = (int)(cvOut[t] * (float)(127 - left - 2));
+        int width = (int)(cvOut[t] * (float)(BAR_RIGHT - BAR_LEFT - 2));
         if(width > 0)
-            hw.display.DrawRect(left + 1, y + 1, left + 1 + width, y + 5, true,
-                                true);
+            hw.display.DrawRect(BAR_LEFT + 1, y + 1, BAR_LEFT + 1 + width,
+                                y + 5, true, true);
+
+        // Gesture level: how strongly this machine is being rewritten
+        int activity
+            = (int)(turing[t].activity * (float)(BAR_RIGHT - BAR_LEFT));
+        if(activity > 0)
+            hw.display.DrawRect(BAR_LEFT, y + 9, BAR_LEFT + activity, y + 10,
+                                true, true);
     }
 }
 
@@ -156,8 +183,7 @@ void UpdateDisplay()
 
     RenderHeader();
     RenderKompassGrid();
-    RenderActivity();
-    RenderCvBars();
+    RenderTuring();
 
     hw.display.Update();
 }

@@ -21,14 +21,36 @@ static const int PPQN            = 24;  // MIDI clock pulses per quarter note
 static const int PULSES_PER_STEP = PPQN / 4;
 static const int STEPS_PER_BAR   = 16; // a resync lands on the next bar line
 
-static const int NUM_KOMPASS_CHANNELS = 3;
+static const int NUM_KOMPASS_CHANNELS = 2;
 static const int NUM_TURING_MACHINES  = 2;
+
+// Gate outputs on the audio jacks: OUT1-3. OUT4 is the 16th note clock.
+enum GateOutput
+{
+    GATE_A,        // OUT1, channel A gate
+    GATE_A_ACCENT, // OUT2, channel A accent
+    GATE_B,        // OUT3, channel B gate
+    NUM_GATE_OUTS,
+};
+
+// Gate lengths in clock pulses (PULSES_PER_STEP to a step), so they follow the
+// tempo under every clock source
+static const int SHORT_GATE_PULSES   = 2; // a third of a step
+static const int REGULAR_GATE_PULSES = 3; // half a step
+
+// A tie holds the gate through at most this many following empty steps, and
+// lets it go halfway through the last one so the next hit still retriggers
+static const int MAX_TIE_STEPS = 3;
+
+// Every gate rises this long after its step: it guarantees a low gap before a
+// gate that is still high is raised again, and lets the CV settle first
+static const uint32_t GATE_DELAY_SAMPLES = 48; // 1ms
 
 static const float MIN_BPM     = 20.0f;
 static const float MAX_BPM     = 300.0f;
 static const float DEFAULT_BPM = 120.0f;
 
-// Trigger pulse widths in samples (48kHz)
+// Clock and reset pulse widths in samples (48kHz)
 static const uint32_t TRIGGER_PULSE_SAMPLES = 480; // 10ms
 static const uint32_t RESET_PULSE_SAMPLES   = 960; // 20ms
 
@@ -89,7 +111,6 @@ enum MenuItem
     MENU_RESYNC,
     MENU_PATTERN_1,
     MENU_PATTERN_2,
-    MENU_PATTERN_3,
     MENU_LAST,
 };
 
@@ -98,7 +119,14 @@ enum KompassCharacter
 {
     KOMPASS_DOWNBEAT, // kick-like: strong metric positions first
     KOMPASS_BACKBEAT, // snare-like: beats 2 and 4 first
-    KOMPASS_OFFBEAT,  // hat-like: offbeats and 16ths first
+};
+
+/** How long a hit holds its gate */
+enum GateShape
+{
+    GATE_SHAPE_SHORT,   // a third of a step
+    GATE_SHAPE_REGULAR, // half a step
+    GATE_SHAPE_TIE,     // through the empty steps that follow, if any
 };
 
 /**
@@ -131,6 +159,8 @@ struct KompassChannel
     float   shuffle[PATTERN_STEPS]; // re-rolled by the density control
     float   weight[PATTERN_STEPS];  // sum of the three, what the ranks use
     uint8_t rank[PATTERN_STEPS];
+    uint8_t shape[PATTERN_STEPS];    // GateShape of the hit, if it fires
+    uint8_t tieSteps[PATTERN_STEPS]; // empty steps a tie may hold through
     float   density;     // raw control value, for reference
     uint8_t activeSteps; // steps allowed to fire, hysteresis applied
     int     rotation;    // steps the pattern is shifted forwards in time
@@ -142,19 +172,32 @@ struct KompassChannel
     void SetDensity(float value);
     void Reshuffle(int keep);
     void Shift(int by);
+    void RollShape(int s);
 
     /** How many of the 32 steps are currently firing */
     int ActiveSteps() const { return (int)activeSteps; }
 
-    bool StepActive(int step) const
+    /** Ranking index of a position in time */
+    int Unrotate(int step) const
     {
         // The rotation maps a position in time back onto the ranking, so the
         // ranking itself never has to move
         int s = step - rotation;
         if(s < 0)
             s += PATTERN_STEPS;
-        return rank[s] < activeSteps;
+        return s;
     }
+
+    bool StepActive(int step) const { return rank[Unrotate(step)] < activeSteps; }
+
+    /** Accents go on the strongest hits, roughly a quarter of them */
+    bool StepAccented(int step) const
+    {
+        return rank[Unrotate(step)] < (activeSteps + 3) / 4;
+    }
+
+    int TiedSteps(int step) const;
+    int GatePulses(int step) const;
 };
 
 /**
@@ -167,7 +210,7 @@ struct KompassChannel
  * the playhead sweeps past them.
  *
  * The loop never changes on its own. New values are written into it only while
- * CTRL4 is being moved: the movement sets how likely a step is to be rewritten
+ * its knob (CTRL2 for machine 1, CTRL4 for machine 2) is being moved: the movement sets how likely a step is to be rewritten
  * and the knob position sets what gets written, so a sweep through low values
  * paints low voltages into the sequence and a sweep up high paints high ones.
  * Stop moving and the loop locks again.
@@ -177,10 +220,10 @@ struct TuringMachine
     uint8_t value[PATTERN_STEPS]; // one 8-bit value per step of the frame
     uint8_t length;               // 8, 16 or 32; the frame is periodic with it
     uint8_t pendingLength;        // length being morphed towards, 0 if settled
-    float   injectionScale;       // how eagerly this machine follows the knob
+    float   activity;             // 0..1, gesture level of this machine's knob
     float   target;               // 0..1, value the gesture is writing now
 
-    void  Init(uint32_t seed, float scale);
+    void  Init(uint32_t seed);
     void  BeginFrame();   // call at step 0: commits or starts a length morph
     float Step(int step); // advances to `step`, returns CV in 0..1
 
@@ -216,9 +259,11 @@ extern uint32_t          internalPulsesConsumed;
 extern float             samplesPerPulse;
 extern volatile bool     pulsePhaseReset; // realign the generator to "now"
 
-// Trigger outputs
-extern volatile bool     triggerOut[NUM_KOMPASS_CHANNELS];
-extern volatile uint32_t triggerCounter[NUM_KOMPASS_CHANNELS];
+// Gate outputs. The main loop raises a gate and counts its length down in
+// clock pulses; the audio callback holds each rising edge back by the gate delay.
+extern volatile bool     gateOut[NUM_GATE_OUTS];
+extern volatile uint32_t gateDelayCounter[NUM_GATE_OUTS];
+extern int               gatePulsesLeft[NUM_GATE_OUTS];
 extern volatile bool     clockOut;
 extern volatile uint32_t clockOutCounter;
 extern volatile bool     resetOut;
@@ -227,10 +272,6 @@ extern volatile uint32_t resetOutCounter;
 // Encoder menu
 extern int  menuItem;   // MenuItem the encoder is pointing at
 extern bool menuActive; // true while the item is being edited
-
-// CTRL4 gesture: rises while the knob moves, fades away when it stops
-extern float knobActivity;
-extern float lastKnobValue;
 
 // Pattern generators
 extern KompassChannel kompass[NUM_KOMPASS_CHANNELS];
@@ -262,6 +303,8 @@ void ApplyPendingResync();
 // pattern.cpp
 void InitPatterns();
 void ProcessStep(int step);
+void TickGates();  // once per clock pulse, before ProcessStep
+void ClearGates();
 void FireReset();
 void WriteCvOutputs();
 

@@ -4,12 +4,14 @@
  * @version 1.0
  *
  * Outputs:
- *   OUT1-3   Bastl Kompass style trigger channels, density from CTRL1-3
+ *   OUT1     Channel A gate (downbeat character), density from CTRL1
+ *   OUT2     Channel A accent
+ *   OUT3     Channel B gate (backbeat character), density from CTRL3
  *   OUT4     16th note clock
- *   GATE OUT Reset pulse at the start of every 32 step pattern
+ *   GATE OUT Reset pulse on start and on a resync
  *   GATE IN1 Analog clock in, one pulse per step
  *   GATE IN2 Reset in
- *   CV1/CV2  Two independent 32 step Turing machine sequences
+ *   CV1/CV2  Turing machine sequences, written by gestures on CTRL2/CTRL4
  *
  * Clock:
  *   A clock patched into GATE IN 1 takes priority; MIDI clock is next and is
@@ -62,15 +64,14 @@ void AudioCallback(AudioHandle::InputBuffer  in,
             pulsePhase = 0.0f;
         }
 
-        // Trigger pulse widths
-        for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
+        // Gates: the main loop sets and ends them, the rising edge is held
+        // back here by the gate delay
+        bool gateHigh[NUM_GATE_OUTS];
+        for(int g = 0; g < NUM_GATE_OUTS; g++)
         {
-            if(triggerOut[c])
-            {
-                triggerCounter[c]++;
-                if(triggerCounter[c] >= TRIGGER_PULSE_SAMPLES)
-                    triggerOut[c] = false;
-            }
+            gateHigh[g] = gateOut[g] && gateDelayCounter[g] == 0;
+            if(gateDelayCounter[g] > 0)
+                gateDelayCounter[g]--;
         }
 
         if(clockOut)
@@ -87,10 +88,10 @@ void AudioCallback(AudioHandle::InputBuffer  in,
                 resetOut = false;
         }
 
-        // 5V trigger = 1.0f on the audio outputs
-        out[0][i] = triggerOut[0] ? 1.0f : 0.0f;
-        out[1][i] = triggerOut[1] ? 1.0f : 0.0f;
-        out[2][i] = triggerOut[2] ? 1.0f : 0.0f;
+        // 5V gate = 1.0f on the audio outputs
+        out[0][i] = gateHigh[GATE_A] ? 1.0f : 0.0f;
+        out[1][i] = gateHigh[GATE_A_ACCENT] ? 1.0f : 0.0f;
+        out[2][i] = gateHigh[GATE_B] ? 1.0f : 0.0f;
         out[3][i] = clockOut ? 1.0f : 0.0f;
     }
 }
@@ -126,7 +127,7 @@ int main(void)
     {
         uint32_t now = System::GetNow();
 
-        // Controls run at a fixed 1kHz: the CTRL4 gesture decay and the knob
+        // Controls run at a fixed 1kHz: the write gesture decay and the knob
         // smoothing both depend on a known tick rate
         if(now != lastControlUpdate)
         {
