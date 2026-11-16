@@ -11,8 +11,8 @@ MIDI clock master/slave and generative gate source for the **Daisy Patch**.
 | OUT3 | Channel B gate (backbeat character) |
 | OUT4 | 16th note clock |
 | GATE OUT | Reset pulse, fired just before the transport starts or on a resync |
-| CV1 | Turing machine 1, sampled on channel A hits (0-5V) |
-| CV2 | Turing machine 2, sampled on channel B hits (0-5V) |
+| CV1 | Turing machine 1 as a note on channel A hits, quantised to the scale (1V/oct, 0-2V) |
+| CV2 | Turing machine 2 as a note on channel B hits, quantised to the scale (1V/oct, 0-2V) |
 | GATE IN1 | Analog clock in, one pulse per step (16th note) |
 | GATE IN2 | Reset in |
 | CTRL1 | Density of channel A (re-rolls the steps not playing) |
@@ -22,7 +22,7 @@ MIDI clock master/slave and generative gate source for the **Daisy Patch**.
 | Encoder turn | Choose a menu item, or edit the active one |
 | Encoder press | Activate / leave the item, or start/stop on the transport |
 | MIDI IN | Clock, Start, Continue, Stop, Reset, Song Position Pointer |
-| MIDI OUT | Clock and transport, generated or forwarded |
+| MIDI OUT | Clock and transport, generated or forwarded; channel A notes on MIDI channel 1, channel B on channel 2 |
 
 Gates are 5V and vary in length (see *Gate lengths*). They rise 1ms after their step,
 so the CV has settled and a gate is always seen as a new one. The clock pulse on OUT4 is
@@ -208,6 +208,34 @@ and machine 2 on channel B hits, so each CV only moves when its paired channel f
 machines still advance every step, which keeps them locked to the 32 step frame and to
 the gate pattern.
 
+## Notes and scale
+
+Each hit also plays a note: the paired Turing machine's value, quantised to the current
+scale over two octaves from C3. Channel A plays it on MIDI channel 1 and CV1, channel B
+on MIDI channel 2 and CV2, so the jacks and MIDI always play the same notes. CV is
+1V/octave with C3 at 0V. A MIDI note lasts exactly as long as its gate, so ties become
+long notes. Velocity is 127 on an accented channel A hit, 90 on other channel A hits and
+100 on channel B. Stopping ends every sounding note.
+
+The scale is a set of pitch classes with a root, and it morphs one note every 8 bars,
+about 16 seconds at 120 BPM, in a cycle of a few minutes:
+
+1. **Shrink.** Notes are removed until a modal skeleton of three notes without a third
+   is left, neither major nor minor. Thirds go first, then sixths and sevenths, then the
+   seconds and the tritone; the fourth and fifth last.
+2. **Shift.** The root moves to another note of the skeleton, preferably its fourth or
+   fifth, without changing the notes themselves.
+3. **Grow.** Notes are added back relative to the new root until the scale has five or
+   six. Minor seconds and the diminished fifth are the most likely, major thirds, sixths
+   and sevenths the least, so the new root is heard as it fills in and the result leans
+   quirky rather than major.
+4. **Hold** for two to four changes, then shrink again.
+
+A scale never holds more than six notes or three adjacent semitones, and the root is
+always in it. The scale starts on a random root at boot. The display shows it as twelve
+cells from C under the first Turing machine: filled for a scale note, taller for the
+root.
+
 ## Controls
 
 The panel controls do not all reach the ends of their travel: CTRL1 stops around 96% and
@@ -223,4 +251,4 @@ make clean && make
 make program-dfu
 ```
 
-Flash usage: 81.1% of 128KB.
+Flash usage: 82.7% of 128KB.

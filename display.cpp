@@ -24,6 +24,11 @@ static const int TURING_HEIGHT = 15;
 static const int BAR_LEFT      = 44;
 static const int BAR_RIGHT     = 127;
 
+// Scale strip in the free space under the first Turing label: one cell per
+// pitch class from C, filled when in the scale, the root drawn taller
+static const int SCALE_TOP        = 44;
+static const int SCALE_CELL_WIDTH = 3;
+
 static void RenderHeader()
 {
     char buffer[32];
@@ -160,10 +165,10 @@ static void RenderTuring()
         hw.display.SetCursor(0, y);
         hw.display.WriteString(buffer, Font_6x8, true);
 
-        // Outline plus fill proportional to the held voltage
+        // Outline plus fill showing where the held note sits in the range
         hw.display.DrawRect(BAR_LEFT, y, BAR_RIGHT, y + 6, true, false);
 
-        int width = (int)(cvOut[t] * (float)(BAR_RIGHT - BAR_LEFT - 2));
+        int width = cvNote[t] * (BAR_RIGHT - BAR_LEFT - 2) / NOTE_RANGE;
         if(width > 0)
             hw.display.DrawRect(BAR_LEFT + 1, y + 1, BAR_LEFT + 1 + width,
                                 y + 5, true, true);
@@ -177,6 +182,22 @@ static void RenderTuring()
     }
 }
 
+static void RenderScale()
+{
+    for(int pc = 0; pc < 12; pc++)
+    {
+        int x = pc * SCALE_CELL_WIDTH;
+
+        if(pc == scale.root)
+            hw.display.DrawRect(x, SCALE_TOP - 1, x + 1, SCALE_TOP + 3, true,
+                                true);
+        else if(scale.Has(pc))
+            hw.display.DrawRect(x, SCALE_TOP, x + 1, SCALE_TOP + 2, true, true);
+        else
+            hw.display.DrawPixel(x, SCALE_TOP + 2, true);
+    }
+}
+
 void UpdateDisplay()
 {
     hw.display.Fill(false);
@@ -184,6 +205,7 @@ void UpdateDisplay()
     RenderHeader();
     RenderKompassGrid();
     RenderTuring();
+    RenderScale();
 
     hw.display.Update();
 }

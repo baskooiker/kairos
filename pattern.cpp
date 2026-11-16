@@ -438,6 +438,9 @@ void InitPatterns()
     for(int t = 0; t < NUM_TURING_MACHINES; t++)
         turing[t].Init(seed + 15485863u * (uint32_t)(t + 1));
 
+    srand(seed + 32452843u);
+    scale.Init();
+
     srand(seed);
 }
 
@@ -455,6 +458,55 @@ void FireReset()
     resetOutCounter = 0;
     dsy_gpio_write(&hw.gate_output, 1);
 }
+
+// ============================================================================
+// MIDI NOTES
+// ============================================================================
+
+static const uint8_t MIDI_CHANNEL_OF[NUM_KOMPASS_CHANNELS]
+    = {MIDI_CHANNEL_A, MIDI_CHANNEL_B};
+
+// Note sounding on each channel, -1 for none
+static int noteOn[NUM_KOMPASS_CHANNELS] = {-1, -1};
+
+static void SendNoteOff(int channel)
+{
+    if(noteOn[channel] < 0)
+        return;
+
+    uint8_t message[3] = {(uint8_t)(0x80 | MIDI_CHANNEL_OF[channel]),
+                          (uint8_t)noteOn[channel],
+                          0};
+    hw.midi.SendMessage(message, 3);
+    noteOn[channel] = -1;
+}
+
+static void SendNoteOn(int channel, int note, uint8_t velocity)
+{
+    // Gates always end before the next hit, except when a gate clock speeds
+    // up; the note is ended first either way, so notes never overlap
+    SendNoteOff(channel);
+
+    uint8_t message[3] = {(uint8_t)(0x90 | MIDI_CHANNEL_OF[channel]),
+                          (uint8_t)note,
+                          velocity};
+    hw.midi.SendMessage(message, 3);
+    noteOn[channel] = note;
+}
+
+/** Channel whose note follows a gate output, -1 for the accent gate */
+static int ChannelOfGate(int gate)
+{
+    if(gate == GATE_A)
+        return 0;
+    if(gate == GATE_B)
+        return 1;
+    return -1;
+}
+
+// ============================================================================
+// GATES
+// ============================================================================
 
 /**
  * @brief Raise a gate for `pulses` clock pulses
@@ -478,7 +530,14 @@ void TickGates()
             continue;
 
         if(--gatePulsesLeft[g] == 0)
+        {
             gateOut[g] = false;
+
+            // A channel's MIDI note lasts exactly as long as its gate
+            int channel = ChannelOfGate(g);
+            if(channel >= 0)
+                SendNoteOff(channel);
+        }
     }
 }
 
@@ -489,6 +548,9 @@ void ClearGates()
         gatePulsesLeft[g] = 0;
         gateOut[g]        = false;
     }
+
+    for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
+        SendNoteOff(c);
 }
 
 void ProcessStep(int step)
@@ -505,37 +567,43 @@ void ProcessStep(int step)
 
         for(int t = 0; t < NUM_TURING_MACHINES; t++)
             turing[t].BeginFrame();
+
+        // The scale morphs one note at a time, every few frames
+        static int framesSinceScaleChange = 0;
+        if(++framesSinceScaleChange >= SCALE_FRAMES_PER_CHANGE)
+        {
+            framesSinceScaleChange = 0;
+            scale.Change();
+        }
     }
 
-    // OUT1 and OUT3: channel A and B gates, OUT2: channel A accents
+    // OUT1 and OUT3: channel A and B gates, OUT2: channel A accents.
+    // CV1-2 and MIDI channels 1-2: the Turing machines, quantised to the scale.
     static const int GATE_OF_CHANNEL[NUM_KOMPASS_CHANNELS] = {GATE_A, GATE_B};
-
-    bool triggered[NUM_KOMPASS_CHANNELS];
 
     for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
     {
-        triggered[c] = kompass[c].StepActive(step);
+        // The Turing machines always advance so they stay locked to the frame,
+        // but a note is only taken when the paired channel actually fires
+        float value = turing[c].Step(step);
 
-        if(!triggered[c])
+        if(!kompass[c].StepActive(step))
             continue;
 
-        int pulses = kompass[c].GatePulses(step);
+        cvNote[c] = scale.Quantize(value, NOTE_BASE, NOTE_RANGE);
+
+        int  pulses   = kompass[c].GatePulses(step);
+        bool accented = c == 0 && kompass[c].StepAccented(step);
+
         StartGate(GATE_OF_CHANNEL[c], pulses);
 
         // The accent lasts as long as the note it accents
-        if(c == 0 && kompass[c].StepAccented(step))
+        if(accented)
             StartGate(GATE_A_ACCENT, pulses);
-    }
 
-    // CV1-2: the Turing machines always advance so they stay locked to the
-    // frame, but the voltage is only sampled when the Kompass channel they are
-    // paired with actually fires
-    for(int t = 0; t < NUM_TURING_MACHINES; t++)
-    {
-        float value = turing[t].Step(step);
-
-        if(triggered[t])
-            cvOut[t] = value;
+        uint8_t velocity = c == 0 ? (accented ? VELOCITY_ACCENT : VELOCITY_A)
+                                  : VELOCITY_B;
+        SendNoteOn(c, NOTE_BASE + cvNote[c], velocity);
     }
 }
 
@@ -543,7 +611,8 @@ void WriteCvOutputs()
 {
     for(int t = 0; t < NUM_TURING_MACHINES; t++)
     {
-        uint16_t value = (uint16_t)(cvOut[t] * 4095.0f);
+        // 1V/octave from 0V at NOTE_BASE
+        uint16_t value = (uint16_t)((float)cvNote[t] * DAC_PER_SEMITONE + 0.5f);
         if(value > 4095)
             value = 4095;
 
