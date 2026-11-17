@@ -233,17 +233,23 @@ about 16 seconds at 120 BPM, in a cycle of a few minutes:
 4. **Hold** for two to four changes, then shrink again.
 
 **Playing the knobs.** On top of the write gesture, CTRL2 and CTRL4 play the scale
-live on MIDI channel 1 and 2. The knob position maps onto the scale over the same three
-octaves, and each time a turn crosses into another scale note, that note plays straight
-away, also with the sequencer stopped or the density at zero. A note holds while the
-knob keeps moving and the next one is sent before the previous one ends, so a
-continuous turn plays legato; once the knob stops for 150ms the note is released, so
-turning and stopping plays staccato. A boundary needs crossing by a margin, so a knob
-resting on one does not flutter, and a resting knob plays nothing when the scale morphs
-under it. When the channel is firing, each note played is also written into its Turing
-machine at the step the channel last fired on, along with that step's repetitions, so
-the loop plays it from then on. Playing is MIDI only: the CV changes when the sequencer
-reaches the step. A sequencer hit on the same channel takes over from a knob note.
+live on MIDI channel 1 and 2, also with the density at zero. The knob position maps onto
+the scale over the same three octaves. Crossing into another scale note queues that note
+for the next 16th step, so live notes always land on the grid; crossing several within
+one step plays only the last, so a fast turn comes out as a run of 16ths. While running,
+the sequencer's steps are the grid. If the channel fires on that step, the hit takes the
+note: it is written into the step and played with the hit's own gate and velocity.
+Otherwise the knob plays it, and with the channel firing it is also written into the
+Turing machine at the step the channel last fired on, along with that step's
+repetitions, so the loop plays it from then on. While stopped, the knobs play on a 16th
+grid of their own at the set tempo, which starts on the first note after a pause.
+
+A knob note holds while the knob keeps moving and the next one is sent before the
+previous one ends, so a continuous turn plays legato; once the knob has stopped for
+150ms, counted from when the note sounded, it is released, so turning and stopping plays
+staccato. A boundary needs crossing by a margin, so a knob resting on one does not
+flutter, and a resting knob plays nothing when the scale morphs under it. Playing is
+MIDI only: the CV changes when the sequencer reaches the step.
 
 A scale never holds more than six notes or three adjacent semitones, and the root is
 always in it. The scale starts on a random root at boot. The display shows it as twelve
@@ -265,4 +271,4 @@ make clean && make
 make program-dfu
 ```
 
-Flash usage: 83.5% of 128KB.
+Flash usage: 83.8% of 128KB.

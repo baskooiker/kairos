@@ -526,6 +526,8 @@ void ProcessControls()
         if(primed)
             ProcessKnobNote(t, turing[t].target, moved, System::GetNow());
     }
+
+    ProcessKnobGrid(System::GetNow());
 }
 
 // ============================================================================

@@ -332,6 +332,7 @@ void InitPatterns();
 void ProcessStep(int step);
 void TickGates();  // once per clock pulse, before ProcessStep
 void ProcessKnobNote(int machine, float position, bool moved, uint32_t now);
+void ProcessKnobGrid(uint32_t now); // knob notes' 16th grid while stopped
 void ClearGates();
 void FireReset();
 void WriteCvOutputs();

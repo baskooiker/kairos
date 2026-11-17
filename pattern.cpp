@@ -552,12 +552,56 @@ static int ChannelOfGate(int gate)
 static int lastHitStep[NUM_KOMPASS_CHANNELS] = {-1, -1};
 
 // Scale note each knob is on, as semitones above NOTE_BASE; -1 until known
-static int      knobNote[NUM_TURING_MACHINES]   = {-1, -1};
+static int      knobNote[NUM_TURING_MACHINES]       = {-1, -1};
 static uint32_t lastKnobMoveMs[NUM_TURING_MACHINES] = {0, 0};
+
+// Note a knob has crossed into, waiting for the next 16th step; -1 for none
+static int pendingKnobNote[NUM_TURING_MACHINES] = {-1, -1};
 
 // Scale each knob's note was found in, so a scale change can be told apart
 // from a turn of the knob
 static uint16_t knobScaleMask[NUM_TURING_MACHINES] = {0, 0};
+
+// The 16th note grid knob notes wait for while the sequencer is stopped
+static uint32_t lastFreeStepMs = 0;
+
+/**
+ * @brief Play a knob note that has come due on a step without a hit
+ *
+ * Legato, so a continuous turn slurs from note to note. With the channel
+ * firing, the note is also written into the Turing machine at the step the
+ * channel last fired on, so the loop plays it from then on.
+ */
+static void PlayKnobNote(int machine, int note, uint32_t now)
+{
+    // Crossing out and back within one step lands on the note already playing
+    if(!(noteFromKnob[machine] && noteOn[machine] == NOTE_BASE + note))
+        SendNoteOn(machine, NOTE_BASE + note, VELOCITY_OF[machine], true, true);
+
+    // The release waits from the moment the note sounds, so a note that came
+    // due after the knob stopped still gets its full length
+    lastKnobMoveMs[machine] = now;
+
+    // Written at the note's centre, so the loop plays back the note heard
+    int step = lastHitStep[machine];
+    if(kompass[machine].ActiveSteps() > 0 && step >= 0
+       && kompass[machine].StepActive(step))
+        turing[machine].Write(step, (float)note / (float)NOTE_RANGE);
+}
+
+/**
+ * @brief Take the knob note due on this step, -1 if none
+ *
+ * Called by the sequencer on every step. A channel that fires on the step
+ * takes the note into the step itself, so the hit plays it with the step's own
+ * gate and velocity; otherwise the note plays from the knob.
+ */
+static int TakeKnobNote(int machine)
+{
+    int note                 = pendingKnobNote[machine];
+    pendingKnobNote[machine] = -1;
+    return note;
+}
 
 /**
  * @brief Play the scale from CTRL2/CTRL4, on top of the write gesture
@@ -566,15 +610,14 @@ static uint16_t knobScaleMask[NUM_TURING_MACHINES] = {0, 0};
  * @param moved The knob moved noticeably in the last measurement window
  * @param now Current time in milliseconds
  *
- * The knob position maps onto the scale over the MIDI note range. Each time it
- * crosses into another scale note that note plays on the channel's MIDI
- * channel straight away, legato, so a continuous turn slurs from note to note.
- * Once the knob stops moving the note is released, so turning and stopping
- * plays staccato. This works whether or not the sequencer runs.
- *
- * With the channel firing, the note is also written into the Turing machine at
- * the step the channel last fired on, so the loop plays it from then on. Only
- * MIDI is played live; the CV follows when the sequencer reaches the step.
+ * The knob position maps onto the scale over the MIDI note range. Crossing
+ * into another scale note queues that note for the next 16th step, so live
+ * notes always land on the grid; crossing several within one step plays only
+ * the last. While running the sequencer's steps are the grid, while stopped
+ * ProcessKnobGrid runs one at the set tempo. A note holds while the knob keeps
+ * moving and is released once it stops, so turning and stopping plays
+ * staccato. Only MIDI is played live; the CV follows when the sequencer
+ * reaches the step.
  */
 void ProcessKnobNote(int machine, float position, bool moved, uint32_t now)
 {
@@ -587,8 +630,9 @@ void ProcessKnobNote(int machine, float position, bool moved, uint32_t now)
     // note the knob is resting on: a knob that is not turned plays nothing
     if(knobNote[machine] < 0 || knobScaleMask[machine] != scale.mask)
     {
-        knobNote[machine]      = scale.Quantize(position, NOTE_BASE, NOTE_RANGE);
-        knobScaleMask[machine] = scale.mask;
+        knobNote[machine]        = scale.Quantize(position, NOTE_BASE, NOTE_RANGE);
+        knobScaleMask[machine]   = scale.mask;
+        pendingKnobNote[machine] = -1;
     }
 
     int candidate = scale.Quantize(position, NOTE_BASE, NOTE_RANGE);
@@ -603,21 +647,9 @@ void ProcessKnobNote(int machine, float position, bool moved, uint32_t now)
     if(candidate != knobNote[machine]
        && toCandidate + KNOB_NOTE_HYSTERESIS < toCurrent)
     {
-        knobNote[machine]       = candidate;
-        lastKnobMoveMs[machine] = now;
-
-        SendNoteOn(machine,
-                   NOTE_BASE + candidate,
-                   VELOCITY_OF[machine],
-                   true,
-                   true);
-
-        // Written at the note's centre, so the loop plays back the note heard
-        int step = lastHitStep[machine];
-        if(kompass[machine].ActiveSteps() > 0 && step >= 0
-           && kompass[machine].StepActive(step))
-            turing[machine].Write(step,
-                                  (float)candidate / (float)NOTE_RANGE);
+        knobNote[machine]        = candidate;
+        pendingKnobNote[machine] = candidate;
+        lastKnobMoveMs[machine]  = now;
         return;
     }
 
@@ -625,6 +657,43 @@ void ProcessKnobNote(int machine, float position, bool moved, uint32_t now)
     if(noteFromKnob[machine] && noteOn[machine] >= 0
        && now - lastKnobMoveMs[machine] >= KNOB_NOTE_RELEASE_MS)
         SendNoteOff(machine);
+}
+
+/**
+ * @brief Let waiting knob notes play on a 16th grid while stopped
+ *
+ * Without a running sequencer there are no steps to wait for, so the grid
+ * runs from the set tempo instead. It starts on the first note that waits, so
+ * the first note after a pause plays straight away.
+ */
+void ProcessKnobGrid(uint32_t now)
+{
+    if(isRunning)
+        return;
+
+    bool waiting = false;
+    for(int t = 0; t < NUM_TURING_MACHINES; t++)
+        waiting = waiting || pendingKnobNote[t] >= 0;
+
+    uint32_t stepMs = (uint32_t)(60000.0f / (tempoBpm * 4.0f));
+
+    if(now - lastFreeStepMs < stepMs)
+        return;
+    if(!waiting)
+    {
+        // Idle: keep the grid ready to fire on the next note
+        lastFreeStepMs = now - stepMs;
+        return;
+    }
+
+    lastFreeStepMs = now;
+
+    for(int t = 0; t < NUM_TURING_MACHINES; t++)
+    {
+        int note = TakeKnobNote(t);
+        if(note >= 0)
+            PlayKnobNote(t, note, now);
+    }
 }
 
 // ============================================================================
@@ -711,8 +780,25 @@ void ProcessStep(int step)
         // The Turing machines always advance so they stay locked to the frame,
         // but a note is only taken when the paired channel actually fires
         float value = turing[c].Step(step);
+        bool  hit   = kompass[c].StepActive(step);
 
-        if(!kompass[c].StepActive(step))
+        // A note waiting on the knob comes due on the step. A hit takes it into
+        // the step, after the gesture had its turn at it, so the hit plays it.
+        int knob = TakeKnobNote(c);
+        if(knob >= 0)
+        {
+            if(hit)
+            {
+                turing[c].Write(step, (float)knob / (float)NOTE_RANGE);
+                value = (float)turing[c].value[step] / 255.0f;
+            }
+            else
+            {
+                PlayKnobNote(c, knob, System::GetNow());
+            }
+        }
+
+        if(!hit)
             continue;
 
         cvOut[c] = value;
