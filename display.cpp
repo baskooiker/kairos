@@ -165,10 +165,10 @@ static void RenderTuring()
         hw.display.SetCursor(0, y);
         hw.display.WriteString(buffer, Font_6x8, true);
 
-        // Outline plus fill showing where the held note sits in the range
+        // Outline plus fill proportional to the held voltage
         hw.display.DrawRect(BAR_LEFT, y, BAR_RIGHT, y + 6, true, false);
 
-        int width = cvNote[t] * (BAR_RIGHT - BAR_LEFT - 2) / NOTE_RANGE;
+        int width = (int)(cvOut[t] * (float)(BAR_RIGHT - BAR_LEFT - 2));
         if(width > 0)
             hw.display.DrawRect(BAR_LEFT + 1, y + 1, BAR_LEFT + 1 + width,
                                 y + 5, true, true);

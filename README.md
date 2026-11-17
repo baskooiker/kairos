@@ -11,8 +11,8 @@ MIDI clock master/slave and generative gate source for the **Daisy Patch**.
 | OUT3 | Channel B gate (backbeat character) |
 | OUT4 | 16th note clock |
 | GATE OUT | Reset pulse, fired just before the transport starts or on a resync |
-| CV1 | Turing machine 1 as a note on channel A hits, quantised to the scale (1V/oct, 0-2V) |
-| CV2 | Turing machine 2 as a note on channel B hits, quantised to the scale (1V/oct, 0-2V) |
+| CV1 | Turing machine 1, sampled on channel A hits, unquantised (0-5V) |
+| CV2 | Turing machine 2, sampled on channel B hits, unquantised (0-5V) |
 | GATE IN1 | Analog clock in, one pulse per step (16th note) |
 | GATE IN2 | Reset in |
 | CTRL1 | Density of channel A (re-rolls the steps not playing) |
@@ -210,10 +210,11 @@ the gate pattern.
 
 ## Notes and scale
 
-Each hit also plays a note: the paired Turing machine's value, quantised to the current
-scale over two octaves from C3. Channel A plays it on MIDI channel 1 and CV1, channel B
-on MIDI channel 2 and CV2, so the jacks and MIDI always play the same notes. CV is
-1V/octave with C3 at 0V. A MIDI note lasts exactly as long as its gate, so ties become
+Each hit also plays a MIDI note: the paired Turing machine's value, quantised to the
+current scale over three octaves, C2 to C5. Channel A plays on MIDI channel 1, channel B
+on MIDI channel 2. Only MIDI is quantised: CV1 and CV2 put out the same values
+unquantised over 0-5V, so the modular side can go atonal for drums and percussion. A
+MIDI note lasts exactly as long as its gate, so ties become
 long notes. Velocity is 127 on an accented channel A hit, 90 on other channel A hits and
 100 on channel B. Stopping ends every sounding note.
 

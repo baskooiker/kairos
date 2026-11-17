@@ -39,5 +39,5 @@ bool menuActive = false;
 
 KompassChannel kompass[NUM_KOMPASS_CHANNELS];
 TuringMachine  turing[NUM_TURING_MACHINES];
-int            cvNote[NUM_TURING_MACHINES] = {0, 0};
+float          cvOut[NUM_TURING_MACHINES] = {0.0f, 0.0f};
 Scale          scale;

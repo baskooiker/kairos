@@ -578,7 +578,8 @@ void ProcessStep(int step)
     }
 
     // OUT1 and OUT3: channel A and B gates, OUT2: channel A accents.
-    // CV1-2 and MIDI channels 1-2: the Turing machines, quantised to the scale.
+    // CV1-2: the Turing machines as they are. MIDI channels 1-2: the same
+    // values as notes, quantised to the scale.
     static const int GATE_OF_CHANNEL[NUM_KOMPASS_CHANNELS] = {GATE_A, GATE_B};
 
     for(int c = 0; c < NUM_KOMPASS_CHANNELS; c++)
@@ -590,7 +591,8 @@ void ProcessStep(int step)
         if(!kompass[c].StepActive(step))
             continue;
 
-        cvNote[c] = scale.Quantize(value, NOTE_BASE, NOTE_RANGE);
+        cvOut[c] = value;
+        int note = NOTE_BASE + scale.Quantize(value, NOTE_BASE, NOTE_RANGE);
 
         int  pulses   = kompass[c].GatePulses(step);
         bool accented = c == 0 && kompass[c].StepAccented(step);
@@ -603,7 +605,7 @@ void ProcessStep(int step)
 
         uint8_t velocity = c == 0 ? (accented ? VELOCITY_ACCENT : VELOCITY_A)
                                   : VELOCITY_B;
-        SendNoteOn(c, NOTE_BASE + cvNote[c], velocity);
+        SendNoteOn(c, note, velocity);
     }
 }
 
@@ -611,8 +613,7 @@ void WriteCvOutputs()
 {
     for(int t = 0; t < NUM_TURING_MACHINES; t++)
     {
-        // 1V/octave from 0V at NOTE_BASE
-        uint16_t value = (uint16_t)((float)cvNote[t] * DAC_PER_SEMITONE + 0.5f);
+        uint16_t value = (uint16_t)(cvOut[t] * 4095.0f);
         if(value > 4095)
             value = 4095;
 

@@ -43,13 +43,13 @@ static const int REGULAR_GATE_PULSES = 3; // half a step
 // lets it go halfway through the last one so the next hit still retriggers
 static const int MAX_TIE_STEPS = 3;
 
-// Notes: channel A plays MIDI channel 1, channel B MIDI channel 2. Both are
-// quantised to the morphing scale over the same range, which CV1/CV2 put out at
-// 1V/octave from 0V at NOTE_BASE.
+// Notes: channel A plays MIDI channel 1, channel B MIDI channel 2, both
+// quantised to the morphing scale over the same three octaves. CV1/CV2 stay
+// unquantised, so the modular side is free to go atonal.
 static const uint8_t MIDI_CHANNEL_A  = 0; // MIDI channel 1
 static const uint8_t MIDI_CHANNEL_B  = 1; // MIDI channel 2
-static const int     NOTE_BASE       = 48; // C3, the note at 0V
-static const int     NOTE_RANGE      = 24; // semitones, so 0-2V on the CV outs
+static const int     NOTE_BASE       = 36; // C2, lowest note
+static const int     NOTE_RANGE      = 36; // semitones, up to C5
 static const uint8_t VELOCITY_ACCENT = 127;
 static const uint8_t VELOCITY_A      = 90;
 static const uint8_t VELOCITY_B      = 100;
@@ -57,9 +57,6 @@ static const uint8_t VELOCITY_B      = 100;
 // The scale changes one note every this many 32 step frames: 8 bars, about
 // 16 seconds at 120 BPM, so a full shrink-shift-grow cycle takes minutes
 static const int SCALE_FRAMES_PER_CHANGE = 4;
-
-// DAC codes per semitone: 4095 codes span 5V
-static const float DAC_PER_SEMITONE = 4095.0f / 5.0f / 12.0f;
 
 // Every gate rises this long after its step: it guarantees a low gap before a
 // gate that is still high is raised again, and lets the CV settle first
@@ -295,7 +292,7 @@ extern bool menuActive; // true while the item is being edited
 // Pattern generators
 extern KompassChannel kompass[NUM_KOMPASS_CHANNELS];
 extern TuringMachine  turing[NUM_TURING_MACHINES];
-extern int            cvNote[NUM_TURING_MACHINES]; // semitones above NOTE_BASE
+extern float          cvOut[NUM_TURING_MACHINES]; // 0..1 of the CV range
 extern Scale          scale;
 
 // ============================================================================
