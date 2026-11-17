@@ -349,6 +349,18 @@ void TuringMachine::ReplicateClass(int step, int len)
         value[q] = value[step];
 }
 
+/** Set a step, and every repetition of it in the frame, to `position` */
+void TuringMachine::Write(int step, float position)
+{
+    if(position < 0.0f)
+        position = 0.0f;
+    if(position > 1.0f)
+        position = 1.0f;
+
+    value[step] = (uint8_t)(position * 255.0f + 0.5f);
+    ReplicateClass(step, pendingLength ? pendingLength : length);
+}
+
 void TuringMachine::Init(uint32_t seed)
 {
     srand(seed);
@@ -466,32 +478,60 @@ void FireReset()
 static const uint8_t MIDI_CHANNEL_OF[NUM_KOMPASS_CHANNELS]
     = {MIDI_CHANNEL_A, MIDI_CHANNEL_B};
 
-// Note sounding on each channel, -1 for none
-static int noteOn[NUM_KOMPASS_CHANNELS] = {-1, -1};
+static const uint8_t VELOCITY_OF[NUM_KOMPASS_CHANNELS] = {VELOCITY_A, VELOCITY_B};
+
+// One note sounds per channel at a time, -1 for none. It is played either by
+// the sequencer, which ends it with its gate, or from the knob, which ends it
+// once the knob stops moving.
+static int  noteOn[NUM_KOMPASS_CHANNELS]       = {-1, -1};
+static bool noteFromKnob[NUM_KOMPASS_CHANNELS] = {false, false};
+
+static void SendRawNote(uint8_t status, int channel, int note, uint8_t velocity)
+{
+    uint8_t message[3] = {(uint8_t)(status | MIDI_CHANNEL_OF[channel]),
+                          (uint8_t)note,
+                          velocity};
+    hw.midi.SendMessage(message, 3);
+}
 
 static void SendNoteOff(int channel)
 {
     if(noteOn[channel] < 0)
         return;
 
-    uint8_t message[3] = {(uint8_t)(0x80 | MIDI_CHANNEL_OF[channel]),
-                          (uint8_t)noteOn[channel],
-                          0};
-    hw.midi.SendMessage(message, 3);
+    SendRawNote(0x80, channel, noteOn[channel], 0);
     noteOn[channel] = -1;
 }
 
-static void SendNoteOn(int channel, int note, uint8_t velocity)
+/**
+ * @brief Play a note, ending the one sounding on the channel
+ * @param legato Send the new note before ending the old one, so a mono synth
+ *        slurs into it instead of retriggering
+ *
+ * The sequencer is never legato: its gates end before the next hit, except
+ * when a gate clock speeds up, and the old note is ended first either way.
+ */
+static void SendNoteOn(int      channel,
+                       int      note,
+                       uint8_t  velocity,
+                       bool     fromKnob,
+                       bool     legato)
 {
-    // Gates always end before the next hit, except when a gate clock speeds
-    // up; the note is ended first either way, so notes never overlap
-    SendNoteOff(channel);
+    int old = noteOn[channel];
 
-    uint8_t message[3] = {(uint8_t)(0x90 | MIDI_CHANNEL_OF[channel]),
-                          (uint8_t)note,
-                          velocity};
-    hw.midi.SendMessage(message, 3);
-    noteOn[channel] = note;
+    // Ending a note after starting the same pitch would end the new one
+    if(old >= 0 && (!legato || old == note))
+    {
+        SendNoteOff(channel);
+        old = -1;
+    }
+
+    SendRawNote(0x90, channel, note, velocity);
+    noteOn[channel]       = note;
+    noteFromKnob[channel] = fromKnob;
+
+    if(old >= 0)
+        SendRawNote(0x80, channel, old, 0);
 }
 
 /** Channel whose note follows a gate output, -1 for the accent gate */
@@ -502,6 +542,89 @@ static int ChannelOfGate(int gate)
     if(gate == GATE_B)
         return 1;
     return -1;
+}
+
+// ============================================================================
+// PLAYING FROM THE KNOBS
+// ============================================================================
+
+// Last step each channel fired on, -1 before the first hit
+static int lastHitStep[NUM_KOMPASS_CHANNELS] = {-1, -1};
+
+// Scale note each knob is on, as semitones above NOTE_BASE; -1 until known
+static int      knobNote[NUM_TURING_MACHINES]   = {-1, -1};
+static uint32_t lastKnobMoveMs[NUM_TURING_MACHINES] = {0, 0};
+
+// Scale each knob's note was found in, so a scale change can be told apart
+// from a turn of the knob
+static uint16_t knobScaleMask[NUM_TURING_MACHINES] = {0, 0};
+
+/**
+ * @brief Play the scale from CTRL2/CTRL4, on top of the write gesture
+ * @param machine Turing machine, and channel, the knob belongs to
+ * @param position Knob position, 0..1 over the usable travel
+ * @param moved The knob moved noticeably in the last measurement window
+ * @param now Current time in milliseconds
+ *
+ * The knob position maps onto the scale over the MIDI note range. Each time it
+ * crosses into another scale note that note plays on the channel's MIDI
+ * channel straight away, legato, so a continuous turn slurs from note to note.
+ * Once the knob stops moving the note is released, so turning and stopping
+ * plays staccato. This works whether or not the sequencer runs.
+ *
+ * With the channel firing, the note is also written into the Turing machine at
+ * the step the channel last fired on, so the loop plays it from then on. Only
+ * MIDI is played live; the CV follows when the sequencer reaches the step.
+ */
+void ProcessKnobNote(int machine, float position, bool moved, uint32_t now)
+{
+    float target = position * (float)NOTE_RANGE;
+
+    if(moved)
+        lastKnobMoveMs[machine] = now;
+
+    // The first reading, and the first after the scale morphs, only finds the
+    // note the knob is resting on: a knob that is not turned plays nothing
+    if(knobNote[machine] < 0 || knobScaleMask[machine] != scale.mask)
+    {
+        knobNote[machine]      = scale.Quantize(position, NOTE_BASE, NOTE_RANGE);
+        knobScaleMask[machine] = scale.mask;
+    }
+
+    int candidate = scale.Quantize(position, NOTE_BASE, NOTE_RANGE);
+
+    float toCandidate = (float)candidate - target;
+    float toCurrent   = (float)knobNote[machine] - target;
+    if(toCandidate < 0.0f)
+        toCandidate = -toCandidate;
+    if(toCurrent < 0.0f)
+        toCurrent = -toCurrent;
+
+    if(candidate != knobNote[machine]
+       && toCandidate + KNOB_NOTE_HYSTERESIS < toCurrent)
+    {
+        knobNote[machine]       = candidate;
+        lastKnobMoveMs[machine] = now;
+
+        SendNoteOn(machine,
+                   NOTE_BASE + candidate,
+                   VELOCITY_OF[machine],
+                   true,
+                   true);
+
+        // Written at the note's centre, so the loop plays back the note heard
+        int step = lastHitStep[machine];
+        if(kompass[machine].ActiveSteps() > 0 && step >= 0
+           && kompass[machine].StepActive(step))
+            turing[machine].Write(step,
+                                  (float)candidate / (float)NOTE_RANGE);
+        return;
+    }
+
+    // Stopping the knob releases a note it played
+    if(noteFromKnob[machine] && noteOn[machine] >= 0
+       && now - lastKnobMoveMs[machine] >= KNOB_NOTE_RELEASE_MS)
+        SendNoteOff(machine);
 }
 
 // ============================================================================
@@ -533,9 +656,10 @@ void TickGates()
         {
             gateOut[g] = false;
 
-            // A channel's MIDI note lasts exactly as long as its gate
+            // A sequenced MIDI note lasts exactly as long as its gate; a note
+            // played from the knob in the meantime is the knob's to end
             int channel = ChannelOfGate(g);
-            if(channel >= 0)
+            if(channel >= 0 && !noteFromKnob[channel])
                 SendNoteOff(channel);
         }
     }
@@ -605,7 +729,8 @@ void ProcessStep(int step)
 
         uint8_t velocity = c == 0 ? (accented ? VELOCITY_ACCENT : VELOCITY_A)
                                   : VELOCITY_B;
-        SendNoteOn(c, note, velocity);
+        SendNoteOn(c, note, velocity, false, false);
+        lastHitStep[c] = step;
     }
 }
 

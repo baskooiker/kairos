@@ -54,6 +54,15 @@ static const uint8_t VELOCITY_ACCENT = 127;
 static const uint8_t VELOCITY_A      = 90;
 static const uint8_t VELOCITY_B      = 100;
 
+// Playing the scale live on CTRL2/CTRL4: a note changes once the knob is this
+// many semitones closer to the next scale note than to the one playing, so a
+// knob resting on a boundary cannot flutter between the two
+static const float KNOB_NOTE_HYSTERESIS = 0.4f;
+
+// A note played from a knob is released once the knob has not moved for this
+// long, so stopping between notes plays staccato and turning on plays legato
+static const uint32_t KNOB_NOTE_RELEASE_MS = 150;
+
 // The scale changes one note every this many 32 step frames: 8 bars, about
 // 16 seconds at 120 BPM, so a full shrink-shift-grow cycle takes minutes
 static const int SCALE_FRAMES_PER_CHANGE = 4;
@@ -245,6 +254,7 @@ struct TuringMachine
 
     void PropagateForward(int step, int len);
     void ReplicateClass(int step, int len);
+    void Write(int step, float position); // set a step and its repetitions
 };
 
 // ============================================================================
@@ -321,6 +331,7 @@ void ApplyPendingResync();
 void InitPatterns();
 void ProcessStep(int step);
 void TickGates();  // once per clock pulse, before ProcessStep
+void ProcessKnobNote(int machine, float position, bool moved, uint32_t now);
 void ClearGates();
 void FireReset();
 void WriteCvOutputs();

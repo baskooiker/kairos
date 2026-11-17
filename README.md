@@ -16,9 +16,9 @@ MIDI clock master/slave and generative gate source for the **Daisy Patch**.
 | GATE IN1 | Analog clock in, one pulse per step (16th note) |
 | GATE IN2 | Reset in |
 | CTRL1 | Density of channel A (re-rolls the steps not playing) |
-| CTRL2 | Write gesture for Turing machine 1 (see below) |
+| CTRL2 | Write gesture for Turing machine 1, and plays channel A's scale over MIDI (see below) |
 | CTRL3 | Density of channel B (re-rolls the steps not playing) |
-| CTRL4 | Write gesture for Turing machine 2 |
+| CTRL4 | Write gesture for Turing machine 2, and plays channel B's scale over MIDI |
 | Encoder turn | Choose a menu item, or edit the active one |
 | Encoder press | Activate / leave the item, or start/stop on the transport |
 | MIDI IN | Clock, Start, Continue, Stop, Reset, Song Position Pointer |
@@ -232,6 +232,19 @@ about 16 seconds at 120 BPM, in a cycle of a few minutes:
    quirky rather than major.
 4. **Hold** for two to four changes, then shrink again.
 
+**Playing the knobs.** On top of the write gesture, CTRL2 and CTRL4 play the scale
+live on MIDI channel 1 and 2. The knob position maps onto the scale over the same three
+octaves, and each time a turn crosses into another scale note, that note plays straight
+away, also with the sequencer stopped or the density at zero. A note holds while the
+knob keeps moving and the next one is sent before the previous one ends, so a
+continuous turn plays legato; once the knob stops for 150ms the note is released, so
+turning and stopping plays staccato. A boundary needs crossing by a margin, so a knob
+resting on one does not flutter, and a resting knob plays nothing when the scale morphs
+under it. When the channel is firing, each note played is also written into its Turing
+machine at the step the channel last fired on, along with that step's repetitions, so
+the loop plays it from then on. Playing is MIDI only: the CV changes when the sequencer
+reaches the step. A sequencer hit on the same channel takes over from a knob note.
+
 A scale never holds more than six notes or three adjacent semitones, and the root is
 always in it. The scale starts on a random root at boot. The display shows it as twelve
 cells from C under the first Turing machine: filled for a scale note, taller for the
@@ -252,4 +265,4 @@ make clean && make
 make program-dfu
 ```
 
-Flash usage: 82.7% of 128KB.
+Flash usage: 83.5% of 128KB.

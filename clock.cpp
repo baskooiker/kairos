@@ -488,13 +488,17 @@ void ProcessControls()
         // of the CV range on a control that falls short of its own.
         float knobRaw = hw.GetKnobValue(GESTURE_KNOB[t]);
 
+        bool moved = false;
+
         if(windowDone)
         {
             float delta = knobRaw - lastKnobValue[t];
             if(delta < 0.0f)
                 delta = -delta;
 
-            if(primed && delta > KNOB_DEADBAND)
+            moved = primed && delta > KNOB_DEADBAND;
+
+            if(moved)
             {
                 turing[t].activity += delta * KNOB_ACTIVITY_GAIN;
 
@@ -516,6 +520,11 @@ void ProcessControls()
         // The knob position is the value being painted, whether or not the
         // gesture is currently active
         turing[t].target = NormalizeKnob(knobRaw);
+
+        // On top of the gesture the knob plays the scale over MIDI. Until the
+        // ADC has settled it only learns where the knob rests.
+        if(primed)
+            ProcessKnobNote(t, turing[t].target, moved, System::GetNow());
     }
 }
 
